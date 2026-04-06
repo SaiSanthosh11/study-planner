@@ -1,0 +1,54 @@
+from fastapi import APIRouter, Depends, HTTPException
+from typing import List
+from bson import ObjectId
+from datetime import datetime
+from app.database import get_db
+from app.models.marks import MarksCreate
+from app.services.marks_service import classify_performance, is_risk_subject, analyze_marks
+from app.middleware.auth_middleware import get_current_user
+
+router = APIRouter(prefix="/marks", tags=["marks"])
+
+def serialize(doc) -> dict:
+    doc["id"] = str(doc.pop("_id"))
+    doc["user_id"] = str(doc["user_id"])
+    return doc
+
+@router.post("", status_code=201)
+async def add_marks(body: MarksCreate, user=Depends(get_current_user)):
+    db = get_db()
+    pct = (body.marks_obtained / body.total_marks) * 100
+    doc = {
+        **body.model_dump(),
+        "user_id": ObjectId(user["id"]),
+        "percentage": round(pct, 2),
+        "performance": classify_performance(pct),
+        "is_risk": is_risk_subject(pct),
+        "created_at": datetime.utcnow(),
+    }
+    # Upsert: replace if same subject + exam_type exists
+    await db.marks.replace_one(
+        {"user_id": ObjectId(user["id"]), "subject_name": body.subject_name, "exam_type": body.exam_type},
+        doc,
+        upsert=True,
+    )
+    inserted = await db.marks.find_one({"user_id": ObjectId(user["id"]), "subject_name": body.subject_name})
+    return serialize(inserted)
+
+@router.get("")
+async def get_marks(user=Depends(get_current_user)):
+    db = get_db()
+    cursor = db.marks.find({"user_id": ObjectId(user["id"])})
+    marks_list = []
+    async for doc in cursor:
+        marks_list.append(serialize(doc))
+    return marks_list
+
+@router.get("/analysis")
+async def get_analysis(user=Depends(get_current_user)):
+    db = get_db()
+    cursor = db.marks.find({"user_id": ObjectId(user["id"])})
+    marks_list = []
+    async for doc in cursor:
+        marks_list.append(serialize(doc))
+    return analyze_marks(marks_list)
